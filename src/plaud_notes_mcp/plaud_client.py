@@ -7,6 +7,7 @@ at api.plaud.ai used by web.plaud.ai.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -100,11 +101,22 @@ class TranscriptSegment:
 
     @classmethod
     def from_api(cls, data: dict[str, Any]) -> TranscriptSegment:
+        # The S3-fetched gzipped JSON uses different keys than the inline
+        # legacy shape: content/start_time/end_time vs text/start_ms/bg.
+        # Verified empirically against real Plaud recordings; both 4m and
+        # 2h+ recordings used the new keys exclusively. Keep the legacy
+        # fallbacks for backward compat with older recordings.
         return cls(
-            text=data.get("text", ""),
+            text=data.get("text", data.get("content", "")),
             speaker=data.get("speaker", data.get("spk", "")),
-            start_ms=data.get("start_time_ms", data.get("start", data.get("bg", 0))),
-            end_ms=data.get("end_time_ms", data.get("end", data.get("ed", 0))),
+            start_ms=data.get(
+                "start_time_ms",
+                data.get("start_time", data.get("start", data.get("bg", 0))),
+            ),
+            end_ms=data.get(
+                "end_time_ms",
+                data.get("end_time", data.get("end", data.get("ed", 0))),
+            ),
         )
 
 
@@ -379,33 +391,150 @@ class PlaudClient:
         # API returns temp_url at top level
         return data.get("temp_url", data.get("data", {}).get("url", ""))
 
+    # ── Content fetch (S3 data_link) ────────────────────────────
+    #
+    # Modern Plaud recordings store transcript and summary content in
+    # gzipped JSON behind data_link URLs in detail["content_list"]. Fetch
+    # via urllib (httpx is configured against api.plaud.ai; data_links
+    # point at S3), gunzip, decode utf-8.
+
+    @staticmethod
+    def _fetch_s3_content(url: str) -> str:
+        """GET a Plaud S3 data_link, gunzip if compressed, return utf-8 string.
+
+        Returns "" on any failure (logs a warning) so callers can fall
+        back to the legacy inline path.
+        """
+        import gzip
+        import urllib.request
+
+        try:
+            with urllib.request.urlopen(url, timeout=30) as resp:  # noqa: S310 — Plaud-issued URL
+                body = resp.read()
+        except Exception as e:  # noqa: BLE001 — defensive; never raise
+            logger.warning("plaud S3 fetch failed: %s", e)
+            return ""
+        try:
+            body = gzip.decompress(body)
+        except (OSError, gzip.BadGzipFile):
+            pass  # not gzipped — use raw bytes
+        try:
+            return body.decode("utf-8")
+        except UnicodeDecodeError as e:
+            logger.warning("plaud S3 content not utf-8: %s", e)
+            return ""
+
+    @staticmethod
+    def _find_content_link(
+        detail: dict[str, Any], data_types: tuple[str, ...]
+    ) -> str | None:
+        """Find the first data_link in detail["content_list"] matching one of
+        the requested data types in priority order. Returns None if not found.
+        """
+        items = detail.get("content_list") or []
+        if not isinstance(items, list):
+            return None
+        for wanted in data_types:
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                if item.get("data_type") == wanted and item.get("data_link"):
+                    return item["data_link"]
+        return None
+
     # ── Transcripts ─────────────────────────────────────────────
 
     def get_transcript(self, file_id: str) -> Transcript:
-        """Get the transcript for a recording."""
+        """Get the transcript for a recording.
+
+        Tries the modern S3/content_list path first (data_type
+        "transaction_polish" preferred over "transaction"); falls back to
+        the legacy inline detail["trans_result"] path. Empty when neither
+        path yields data — never raises.
+        """
         file_id = self._validate_file_id(file_id)
         detail = self.get_recording_detail(file_id)
-        trans_result = detail.get("trans_result", {})
 
+        # Modern path: gzipped JSON behind a data_link
+        link = self._find_content_link(detail, ("transaction_polish", "transaction"))
+        if link:
+            raw = self._fetch_s3_content(link)
+            if raw:
+                try:
+                    parsed = json.loads(raw)
+                except json.JSONDecodeError as e:
+                    logger.warning("transcript JSON parse failed: %s", e)
+                    parsed = None
+                if isinstance(parsed, dict):
+                    raw_segments = parsed.get("segments", parsed.get("result", []))
+                elif isinstance(parsed, list):
+                    raw_segments = parsed
+                else:
+                    raw_segments = []
+                if raw_segments:
+                    segments = [TranscriptSegment.from_api(s) for s in raw_segments]
+                    return Transcript(file_id=file_id, segments=segments)
+
+        # Legacy fallback: inline trans_result
+        trans_result = detail.get("trans_result", {})
         segments = []
         if isinstance(trans_result, dict):
             raw_segments = trans_result.get("segments", trans_result.get("result", []))
             segments = [TranscriptSegment.from_api(s) for s in raw_segments]
         elif isinstance(trans_result, list):
             segments = [TranscriptSegment.from_api(s) for s in trans_result]
-
         return Transcript(file_id=file_id, segments=segments)
 
     # ── AI Summaries ────────────────────────────────────────────
 
     def get_summary(self, file_id: str) -> str:
-        """Get the AI-generated summary for a recording."""
+        """Get the AI-generated summary for a recording.
+
+        Tries modern S3/content_list (data_type "auto_sum_note") first;
+        unwraps the JSON-wrapped variant {"ai_content": "..."} when
+        present; falls back to inline detail["ai_content"]. Returns ""
+        when no summary is available.
+        """
         file_id = self._validate_file_id(file_id)
         detail = self.get_recording_detail(file_id)
+
+        # Modern path
+        link = self._find_content_link(detail, ("auto_sum_note",))
+        if link:
+            raw = self._fetch_s3_content(link)
+            if raw:
+                summary = self._unwrap_summary(raw)
+                if summary:
+                    return summary
+
+        # Legacy fallback
         ai_content = detail.get("ai_content", "")
         if isinstance(ai_content, dict):
             return ai_content.get("content", ai_content.get("summary", str(ai_content)))
         return str(ai_content) if ai_content else ""
+
+    @staticmethod
+    def _unwrap_summary(raw: str) -> str:
+        """Detect JSON-wrapped summaries and unwrap; otherwise return raw text.
+
+        Plaud's auto_sum_note is sometimes raw markdown, sometimes JSON
+        with the markdown nested under "ai_content"/"content"/"summary"/
+        "text". Empirically verified against 2h+ recordings.
+        """
+        stripped = raw.lstrip()
+        if not stripped.startswith("{"):
+            return raw
+        try:
+            parsed = json.loads(stripped)
+        except json.JSONDecodeError:
+            return raw
+        if not isinstance(parsed, dict):
+            return raw
+        for key in ("ai_content", "content", "summary", "text"):
+            value = parsed.get(key)
+            if isinstance(value, str) and value:
+                return value
+        return raw
 
     def get_notes(self, file_id: str) -> str:
         """Get AI-generated notes for a recording."""

@@ -39,7 +39,7 @@ class TokenCache:
         cached = self._lookup(google_sub)
         if cached is not None:
             self._hits += 1
-            logger.info(
+            logger.debug(
                 "token_cache hit", extra={"cache_event": "hit", "google_sub_prefix": google_sub[:8]}
             )
             return cached
@@ -51,14 +51,14 @@ class TokenCache:
             cached = self._lookup(google_sub)
             if cached is not None:
                 self._hits += 1
-                logger.info(
+                logger.debug(
                     "token_cache hit (collapsed)",
                     extra={"cache_event": "hit", "google_sub_prefix": google_sub[:8]},
                 )
                 return cached
 
             self._misses += 1
-            logger.info(
+            logger.debug(
                 "token_cache miss",
                 extra={"cache_event": "miss", "google_sub_prefix": google_sub[:8]},
             )
@@ -70,6 +70,7 @@ class TokenCache:
 
     def invalidate(self, google_sub: str) -> None:
         self._cache.pop(google_sub, None)
+        self._maybe_drop_lock(google_sub)
 
     def metrics(self) -> dict[str, int]:
         return {"hits": self._hits, "misses": self._misses, "size": len(self._cache)}
@@ -91,7 +92,21 @@ class TokenCache:
         self._cache[google_sub] = (token, expires_at)
         self._cache.move_to_end(google_sub)
         while len(self._cache) > self._max:
-            self._cache.popitem(last=False)  # evict LRU
+            evicted_sub, _ = self._cache.popitem(last=False)  # evict LRU
+            self._maybe_drop_lock(evicted_sub)
+
+    def _maybe_drop_lock(self, google_sub: str) -> None:
+        """Drop a per-sub lock if it's idle (no waiters and not held).
+
+        Without this, _locks grows unboundedly with every distinct sub the
+        cache has ever seen. Idle locks are safe to drop — the next get()
+        for that sub will lazily recreate one.
+        """
+        lock = self._locks.get(google_sub)
+        if lock is None:
+            return
+        if not lock.locked():
+            self._locks.pop(google_sub, None)
 
     async def _get_lock(self, google_sub: str) -> asyncio.Lock:
         async with self._lock_table_lock:

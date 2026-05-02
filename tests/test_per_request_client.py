@@ -10,8 +10,6 @@ Validates that:
 from __future__ import annotations
 
 import datetime as _dt
-from contextvars import copy_context
-from unittest.mock import AsyncMock
 
 import pytest
 

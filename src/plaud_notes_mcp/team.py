@@ -19,7 +19,7 @@ from starlette.routing import Route
 
 from plaud_notes_mcp.firestore_keyvalue import FirestoreKeyValue
 from plaud_notes_mcp.firestore_store import FirestoreStore
-from plaud_notes_mcp.plaud_client import PlaudAuthError, PlaudClient
+from plaud_notes_mcp.plaud_client import PlaudClient
 from plaud_notes_mcp.token_cache import TokenCache
 
 logger = logging.getLogger(__name__)
@@ -97,6 +97,14 @@ async def resolve_plaud_client(google_sub: str, *, cache: TokenCache) -> PlaudCl
     upstream patch to PlaudClient.__init__.
     """
     row = await cache.get(google_sub)
+    return _plaud_client_from_row(row)
+
+
+def _plaud_client_from_row(row) -> PlaudClient | None:
+    """Construct a PlaudClient from an already-fetched StoredToken row.
+
+    Avoids a second cache hit when the caller already has the row.
+    """
     if row is None:
         return None
     return PlaudClient(token=row.plaud_token, region=row.region)
@@ -129,11 +137,13 @@ class TeamAuthMiddleware:
             claims = getattr(access, "claims", None) or {}
             google_sub = claims.get("sub")
             if google_sub:
+                # Single cache read; reuse the row to build the client so we
+                # don't hit Firestore + KMS twice on the hot path.
                 row = await self._cache.get(google_sub)
-                if row is not None:
+                plaud_client = _plaud_client_from_row(row)
+                if plaud_client is not None:
                     from plaud_notes_mcp.server import _plaud_client_var
 
-                    plaud_client = await resolve_plaud_client(google_sub, cache=self._cache)
                     token_var = _plaud_client_var.set(plaud_client)
 
         try:
@@ -172,6 +182,7 @@ def build_team_app(*, use_in_memory_storage: bool = False) -> Starlette:
 
     # User-token store + cache (used by /admin/save and the auth middleware
     # mounted in Phase 7).
+    owned_admin_http_client = None
     if use_in_memory_storage:
         store = None
         cache = None
@@ -179,7 +190,7 @@ def build_team_app(*, use_in_memory_storage: bool = False) -> Starlette:
     else:
         store = build_user_store()
         cache = build_token_cache(store)
-        admin_routes = build_admin_routes(
+        admin_routes, owned_admin_http_client = build_admin_routes(
             store=store,
             cache=cache,
             google_client_id=_required("GOOGLE_OAUTH_CLIENT_ID"),
@@ -194,12 +205,27 @@ def build_team_app(*, use_in_memory_storage: bool = False) -> Starlette:
         # Wrap the FastMCP inner app in our auth middleware so the
         # _plaud_client_var ContextVar is populated for /mcp requests.
         inner = TeamAuthMiddleware(inner, cache=cache)
+
+    # Compose lifespan: run inner FastMCP lifespan AND close the owned
+    # httpx.AsyncClient on shutdown so file descriptors don't leak across
+    # Cloud Run revision rollovers.
+    from contextlib import asynccontextmanager
+
+    @asynccontextmanager
+    async def lifespan(starlette_app):
+        async with inner_lifespan(starlette_app):
+            try:
+                yield
+            finally:
+                if owned_admin_http_client is not None:
+                    await owned_admin_http_client.aclose()
+
     app = Starlette(
         routes=[
             Route("/health", _health, methods=["GET"]),
             *admin_routes,
         ],
-        lifespan=inner_lifespan,
+        lifespan=lifespan,
     )
     app.mount("/", inner)
     app.state.user_store = store

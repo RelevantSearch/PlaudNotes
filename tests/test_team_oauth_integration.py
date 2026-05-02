@@ -11,8 +11,6 @@ This file focuses on assembly correctness, not OAuth correctness.
 
 from __future__ import annotations
 
-import json
-
 import pytest
 from fastmcp.server.auth.providers.google import GoogleProvider
 from starlette.testclient import TestClient

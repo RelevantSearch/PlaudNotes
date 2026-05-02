@@ -1,8 +1,7 @@
 """Smoke tests for the plaud-notes-mcp package.
 
-The team-mode test is deliberately RED in this phase — `plaud_notes_mcp.team`
-doesn't exist yet. It will go green when Phase 8 (composition) lands. This
-proves CI is running and would catch regressions.
+Both tests should pass — the team-mode entrypoint went green at Plan 2
+Phase 5. They guard against regressions on the core import surface.
 """
 
 
@@ -11,9 +10,9 @@ def test_package_importable():
 
 
 def test_team_mode_module_importable():
-    """Imports the team-mode entrypoint added in Plan 2 Phase 8.
+    """The team-mode entrypoint must import cleanly even with no team env vars.
 
-    Currently RED — module doesn't exist until composition phase. Don't
-    skip; let it fail loudly so we know CI is honest.
+    Lazy GCP-client construction means importing plaud_notes_mcp.team in
+    single-tenant local mode doesn't require team-mode setup.
     """
     from plaud_notes_mcp import team  # noqa: F401

@@ -57,11 +57,24 @@ def build_admin_routes(
     session_secret: str,
     public_url: str,
     http_client: httpx.AsyncClient | None = None,
-) -> list[Route]:
-    """Build the /admin Starlette routes. http_client injectable for tests."""
+) -> tuple[list[Route], httpx.AsyncClient | None]:
+    """Build the /admin Starlette routes.
+
+    Returns (routes, owned_client). When the caller injects http_client the
+    returned owned_client is None (caller is responsible for lifecycle).
+    When this function constructs the client itself, it returns it so the
+    parent app can close() it on shutdown via lifespan.
+    """
 
     redirect_uri = public_url.rstrip("/") + "/admin/auth/callback"
-    client = http_client or httpx.AsyncClient(timeout=httpx.Timeout(connect=5, read=10, write=5, pool=5))
+    owned_client: httpx.AsyncClient | None = None
+    if http_client is None:
+        owned_client = httpx.AsyncClient(
+            timeout=httpx.Timeout(connect=5, read=10, write=5, pool=5)
+        )
+        client = owned_client
+    else:
+        client = http_client
 
     async def admin_index(request: Request) -> Response:
         session = decode_session_cookie(session_secret, request.cookies.get(SESSION_COOKIE))
@@ -100,7 +113,15 @@ def build_admin_routes(
         if token_resp.status_code != 200:
             logger.warning("google token exchange failed", extra={"status": token_resp.status_code})
             return Response("google token exchange failed", status_code=400)
-        access_token = token_resp.json().get("access_token")
+        try:
+            token_payload = token_resp.json()
+        except ValueError:
+            logger.warning("google token endpoint returned non-JSON")
+            return Response("google token endpoint returned non-JSON", status_code=502)
+        access_token = token_payload.get("access_token")
+        if not access_token:
+            logger.warning("google token response missing access_token")
+            return Response("google token response missing access_token", status_code=502)
         ui_resp = await client.get(
             GOOGLE_USERINFO_URL, headers={"Authorization": f"Bearer {access_token}"}
         )
@@ -163,12 +184,13 @@ def build_admin_routes(
         cache.invalidate(session["google_sub"])
         return HTMLResponse(_render_success(session["email"]))
 
-    return [
+    routes = [
         Route("/admin", admin_index, methods=["GET"]),
         Route("/admin/auth/login", admin_login, methods=["GET"]),
         Route("/admin/auth/callback", admin_callback, methods=["GET"]),
         Route("/admin/save", admin_save, methods=["POST"]),
     ]
+    return routes, owned_client
 
 
 def _render_form(

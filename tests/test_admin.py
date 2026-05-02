@@ -111,14 +111,14 @@ def _build_app(store, cache, http_mocks, *, plaud_outcome="success"):
     transport = httpx.MockTransport(transport_handler)
     http_client = httpx.AsyncClient(transport=transport)
 
-    routes = build_admin_routes(
+    routes, _owned = build_admin_routes(
         store=store,
         cache=cache,
         google_client_id=GOOGLE_CLIENT_ID,
         google_client_secret=GOOGLE_CLIENT_SECRET,
         session_secret=SESSION_SECRET,
         public_url=PUBLIC_URL,
-        http_client=http_client,
+        http_client=http_client,  # caller-owned; owned_client is None
     )
     app = Starlette(routes=routes)
     return app

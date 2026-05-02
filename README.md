@@ -94,6 +94,8 @@ export PLAUD_REGION=eu
 
 > The server auto-detects region mismatches and redirects automatically, but setting the correct region avoids the extra round-trip.
 
+> **Stdio reload caveat (developers):** when you `pip install -e .` and edit source, an already-running stdio MCP subprocess keeps the old bytecode — Claude Desktop / Claude Code spawn the server once and reuse it. To pick up changes, restart the MCP host (re-register the connector or restart the host session). HTTP/team-mode is unaffected — Cloud Run cycles a fresh revision on each deploy.
+
 ### 4. Connect to Claude
 
 **Claude Code (CLI):**
