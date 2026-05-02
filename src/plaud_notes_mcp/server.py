@@ -103,13 +103,53 @@ def _check_http_security() -> None:
         else:
             logger.info("HTTP transport: API key authentication enabled.")
 
-# ── Client singleton ────────────────────────────────────────────
+# ── Client resolution ───────────────────────────────────────────
+#
+# Two modes:
+#   - Local stdio (default): _client is a module-level singleton built
+#     from PLAUD_TOKEN env var. Behavior unchanged from upstream.
+#   - Team mode (PLAUD_DEPLOYMENT_MODE=team): per-request PlaudClient
+#     populated by the auth middleware into _plaud_client_var. _get_client()
+#     reads the ContextVar; if unset, raises NoPlaudTokenError which the
+#     tools convert into a structured "no_plaud_token" MCP response.
+
+from contextvars import ContextVar
+from typing import Any
 
 _client: PlaudClient | None = None
+_plaud_client_var: ContextVar[Any] = ContextVar("plaud_client", default=None)
+_team_mode: bool = False
+
+
+class NoPlaudTokenError(RuntimeError):
+    """Raised in team mode when the authenticated user has no Plaud token registered."""
+
+
+def set_team_mode(enabled: bool) -> None:
+    global _team_mode
+    _team_mode = bool(enabled)
+
+
+def is_team_mode() -> bool:
+    return _team_mode
 
 
 def _get_client() -> PlaudClient:
-    """Get or create the Plaud API client."""
+    """Resolve the PlaudClient for the current request.
+
+    Team mode: read ContextVar populated by auth middleware. Raise
+    NoPlaudTokenError if missing.
+
+    Local mode: lazily construct singleton from PLAUD_TOKEN env var.
+    """
+    if _team_mode:
+        client = _plaud_client_var.get()
+        if client is None:
+            raise NoPlaudTokenError(
+                "no Plaud token registered for the current user; visit /admin"
+            )
+        return client
+
     global _client
     if _client is None:
         token = os.environ.get("PLAUD_TOKEN")
@@ -121,6 +161,20 @@ def _get_client() -> PlaudClient:
             api_domain=api_domain,
         )
     return _client
+
+
+def structured_no_token_error(*, public_url: str | None = None) -> dict[str, str]:
+    """Return the structured 'no_plaud_token' MCP error body."""
+    base = (public_url or os.environ.get("PUBLIC_URL", "")).rstrip("/")
+    return {
+        "error": "no_plaud_token",
+        "registration_url": f"{base}/admin" if base else "/admin",
+        "message": "Register your Plaud token at the URL above, then retry.",
+    }
+
+
+def _no_token_response() -> str:
+    return json.dumps(structured_no_token_error(), indent=2)
 
 
 # ── Tools ───────────────────────────────────────────────────────
@@ -170,6 +224,8 @@ def list_recordings(
             {"total_returned": len(results), "recordings": results},
             indent=2,
         )
+    except NoPlaudTokenError:
+        return _no_token_response()
     except PlaudAuthError as e:
         return f"Authentication error: {e}"
     except PlaudAPIError as e:
@@ -201,6 +257,8 @@ def get_transcript(file_id: str) -> str:
             },
             indent=2,
         )
+    except NoPlaudTokenError:
+        return _no_token_response()
     except PlaudAuthError as e:
         return f"Authentication error: {e}"
     except PlaudAPIError as e:
@@ -232,6 +290,8 @@ def get_summary(file_id: str) -> str:
             result["notes"] = notes
 
         return json.dumps(result, indent=2)
+    except NoPlaudTokenError:
+        return _no_token_response()
     except PlaudAuthError as e:
         return f"Authentication error: {e}"
     except PlaudAPIError as e:
@@ -280,6 +340,8 @@ def get_recording_detail(file_id: str) -> str:
                 result["ai_summary"] = str(ai_content)
 
         return json.dumps(result, indent=2)
+    except NoPlaudTokenError:
+        return _no_token_response()
     except PlaudAuthError as e:
         return f"Authentication error: {e}"
     except PlaudAPIError as e:
@@ -328,6 +390,8 @@ def search_notes(query: str, limit: int = 20) -> str:
             },
             indent=2,
         )
+    except NoPlaudTokenError:
+        return _no_token_response()
     except PlaudAuthError as e:
         return f"Authentication error: {e}"
     except PlaudAPIError as e:
@@ -352,6 +416,8 @@ def list_tags() -> str:
             for t in tags
         ]
         return json.dumps({"tags": results}, indent=2)
+    except NoPlaudTokenError:
+        return _no_token_response()
     except PlaudAuthError as e:
         return f"Authentication error: {e}"
     except PlaudAPIError as e:
@@ -372,6 +438,8 @@ def list_speakers() -> str:
             return "No speakers found."
 
         return json.dumps({"speakers": speakers}, indent=2)
+    except NoPlaudTokenError:
+        return _no_token_response()
     except PlaudAuthError as e:
         return f"Authentication error: {e}"
     except PlaudAPIError as e:
@@ -403,6 +471,8 @@ def get_audio_url(file_id: str) -> str:
             },
             indent=2,
         )
+    except NoPlaudTokenError:
+        return _no_token_response()
     except PlaudAuthError as e:
         return f"Authentication error: {e}"
     except PlaudAPIError as e:
@@ -420,6 +490,8 @@ def get_user_info() -> str:
         client = _get_client()
         info = client.get_user_info()
         return json.dumps({"user": info}, indent=2)
+    except NoPlaudTokenError:
+        return _no_token_response()
     except PlaudAuthError as e:
         return f"Authentication error: {e}"
     except PlaudAPIError as e:
@@ -440,6 +512,8 @@ def list_devices() -> str:
             return "No devices found on your Plaud account."
 
         return json.dumps({"devices": devices}, indent=2)
+    except NoPlaudTokenError:
+        return _no_token_response()
     except PlaudAuthError as e:
         return f"Authentication error: {e}"
     except PlaudAPIError as e:
@@ -468,6 +542,8 @@ def get_recent_context(count: int = 5) -> str:
             {"recent_notes_count": len(results), "notes": results},
             indent=2,
         )
+    except NoPlaudTokenError:
+        return _no_token_response()
     except PlaudAuthError as e:
         return f"Authentication error: {e}"
     except PlaudAPIError as e:
@@ -507,6 +583,8 @@ def get_recordings_by_tag(tag_id: str) -> str:
             {"tag_id": tag_id, "count": len(results), "recordings": results},
             indent=2,
         )
+    except NoPlaudTokenError:
+        return _no_token_response()
     except PlaudAuthError as e:
         return f"Authentication error: {e}"
     except PlaudAPIError as e:
