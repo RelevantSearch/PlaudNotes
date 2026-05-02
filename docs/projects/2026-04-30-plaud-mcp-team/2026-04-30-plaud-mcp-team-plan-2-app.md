@@ -32,7 +32,7 @@ Plan docs are mirrored from this rs_infra location into the fork at `docs/projec
   - Secret Manager has `plaud-mcp-google-oauth-client-id`, `plaud-mcp-google-oauth-client-secret`, `plaud-mcp-jwt-signing-key`, `plaud-mcp-session-secret`
   - WIF binding for `RelevantSearch/PlaudNotes` repo
 - Plan 1 Phase 0 verifications complete and captured:
-  - Plaud TOS verdict (open question 1)
+  - Plaud TOS posture captured (no legal-review gate per `feedback_credential_proxy_no_legal`)
   - Plaud `/me` endpoint URL (open question 2)
   - FastMCP version pinned in upstream PlaudNotes (open question 3)
 - Google OAuth consent screen confirmed Internal-type for `relevantsearch.com`
@@ -399,7 +399,7 @@ Connect to `https://plaud-mcp-dev.relevantsearch.com/mcp`. Verify spec-compliant
 
 **Stage 5 — Promote to production** (`plaud-mcp.relevantsearch.com`):
 - Repeat Stages 1-4 on prod domain
-- Onboard 2-3 early testers (Bari TOS verdict must be in by this point)
+- Onboard 2-3 early testers
 - After 48h with no issues: org-wide enablement
 
 **Acceptance:** All stages green; UX papercuts captured for follow-up tickets.

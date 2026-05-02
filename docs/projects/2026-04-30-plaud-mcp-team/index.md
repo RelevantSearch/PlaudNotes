@@ -23,7 +23,7 @@ Four parallel research streams (FastMCP spike, claude.ai OAuth behavior, Plaud A
 - **Just-in-time `/admin` for Plaud token capture** instead of a mid-OAuth-flow form. Keeps `GoogleProvider` vanilla (no FastMCP internals coupling), separates the "claude.ai connection" concern from the "Plaud token registration" concern.
 - **Plaud official OAuth API exists in private beta** ([waitlist](https://support.plaud.ai/hc/en-us/articles/56061278749209-FAQs-for-Plaud-OAuth-API)). Long-term migration target — `tokenstr` proxy is a strictly time-boxed bridge.
 - **claude.ai has an active OAuth connector bug** ([anthropics/claude-code#46140](https://github.com/anthropics/claude-code/issues/46140), open as of 2026-04-29). Mitigations: dev subdomain `plaud-mcp-dev.relevantsearch.com` for iteration to avoid burning the prod domain's connector cache state, always emit `WWW-Authenticate` on 401s.
-- **TOS is AMBIGUOUS** — Bari (Polsinelli) review required before any non-Stefan user onboards.
+- **TOS is ambiguous in places** but the user-supplied-credential-proxy pattern is standard SaaS-integration practice; not gated on legal review. Plaud OAuth API access is the long-term migration target.
 
 ## Documents
 

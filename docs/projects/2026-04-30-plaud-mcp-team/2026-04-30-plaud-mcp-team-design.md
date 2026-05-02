@@ -215,9 +215,11 @@ In the v1 capability-URL design we needed IAP because the per-user URL was the c
 - App logs: `email_hash` (SHA-256 of lowercased email), `google_sub_prefix` (first 8 chars), `tool_name`, `latency_ms`, `error_code`. Never log Plaud token, MCP JWT, Google ID token, OAuth codes, session cookies, or any secret values.
 - **LB access logs cannot redact URL paths** — verified in [04-gcp-and-upstream-verification.md](./spike/04-gcp-and-upstream-verification.md). `optional_mode`/`optional_fields` only toggle TLS metadata + ORCA, not `httpRequest`. This is moot for the OAuth design — Bearer tokens are sent in the `Authorization` header (not logged by default), and authorization codes appear only in the `redirect_uri` callback to claude.ai's domain (not ours). LB log_config matches drive-mcp's pattern: `enable=true; sample_rate=1.0`, no redaction attempted.
 
-**Plaud TOS (AMBIGUOUS — Bari review required):**
+**Plaud TOS posture:**
 
-Per [03-plaud-api-tos.md](./spike/03-plaud-api-tos.md), three TOS clauses create risk: reverse-engineering prohibition, credential confidentiality requirement, and (regionally explicit) account-sharing ban. Strongest TOS-adjacent risk is the existence of Plaud's official OAuth API (private beta) which weakens any "no alternative" defense for the `tokenstr` workaround. **Action:** submit Plaud OAuth waitlist application immediately ([waitlist URL](https://support.plaud.ai/hc/en-us/articles/56061278749209-FAQs-for-Plaud-OAuth-API)); Bari Rascoe (Polsinelli) reviews full TOS HTML before any non-Stefan user onboards. Fallback if Bari blocks: per-user Cloud Run services (one container per teammate, each with their own `PLAUD_TOKEN` in SOPS) — strictly worse UX, legally cleaner.
+Per [03-plaud-api-tos.md](./spike/03-plaud-api-tos.md), three TOS clauses (reverse-engineering, credential confidentiality, account-sharing) are noted as awareness items. The user-supplied-credential-proxy pattern this design uses is standard SaaS-integration practice (e.g., Calendly, Zapier, Bullhorn integrations) — each user supplies their own `tokenstr` to operate against their own Plaud account; KMS-encrypted at rest; never plaintext-stored; never shared across users. Per `feedback_credential_proxy_no_legal`, this is a CTO judgment call, not a counsel-review gate.
+
+Plaud's official OAuth API (private beta, [waitlist](https://support.plaud.ai/hc/en-us/articles/56061278749209-FAQs-for-Plaud-OAuth-API)) is the long-term migration target. The `tokenstr` proxy is a time-boxed bridge until OAuth waitlist access is granted.
 
 **claude.ai OAuth bug mitigations** (per [02-claude-ai-mcp-behavior.md](./spike/02-claude-ai-mcp-behavior.md)):
 
@@ -318,7 +320,7 @@ Test against `plaud-mcp-dev.relevantsearch.com` first; only graduate to prod dom
 
 | Phase | Owner | Gate |
 |---|---|---|
-| 0. Phase 0 verifications complete (see Plan 1 Phase 0) + Plaud OAuth waitlist submitted + Bari TOS review kicked off | Stefan + Platform | All Phase 0 outputs captured; OAuth waitlist confirmation; Bari engagement scheduled |
+| 0. Phase 0 verifications complete (see Plan 1 Phase 0) + Plaud OAuth waitlist submitted | Stefan + Platform | All Phase 0 outputs captured; OAuth waitlist confirmation |
 | 1. Infra (rs_infra PR series, one per phase) | Platform | `tofu plan` clean per phase, manual first apply for bootstrap, smoke checks pass |
 | 2. Google OAuth consent screen + client (SEPARATE client from drive-mcp; new redirect URIs for `/oauth/google/callback` and `/admin/auth/callback`) | Workspace admin | Internal-type consent for `relevantsearch.com`; client ID/secret in SOPS |
 | 3. App fork created in `RelevantSearch/PlaudNotes` (NOT under jameshenning) | Platform | Repo exists, default branch `main`, branch protection on, CLAUDE.md committed, FastMCP package migration committed |
@@ -327,13 +329,12 @@ Test against `plaud-mcp-dev.relevantsearch.com` first; only graduate to prod dom
 | 6. Stefan E2E via Claude Code CLI on `plaud-mcp-dev` | Stefan | OAuth + JIT flow completes via CLI; `list_recordings` returns real data |
 | 7. Stefan E2E via MCP Inspector on `plaud-mcp-dev` | Stefan | Same flow, spec-compliant tool surface confirmed |
 | 8. Stefan E2E via claude.ai web on `plaud-mcp-dev` | Stefan | OAuth + JIT flow completes; if `#46140` bites, document and decide whether to ship anyway with CLI fallback |
-| 9. Bari TOS review delivered | Stefan + Bari | Verdict on `tokenstr` proxy; if blocked, project pivots to per-user containers (out of scope for this plan) |
-| 10. Promote to `plaud-mcp.relevantsearch.com`; 2-3 early testers | Stefan | No issues for 48h on prod domain |
-| 11. Org-wide enablement | Stefan | Onboarding doc posted in Slack with screenshots + Claude Code CLI fallback instructions |
+| 9. Promote to `plaud-mcp.relevantsearch.com`; 2-3 early testers | Stefan | No issues for 48h on prod domain |
+| 10. Org-wide enablement | Stefan | Onboarding doc posted in Slack with screenshots + Claude Code CLI fallback instructions |
 
 ## Open questions (status post-research)
 
-1. **Plaud TOS:** AMBIGUOUS per [03-plaud-api-tos.md](./spike/03-plaud-api-tos.md). **Bari sign-off required before any non-Stefan user onboards.** Stefan to capture full TOS HTML and engage Bari ASAP.
+1. ✅ **Plaud TOS:** ambiguous per [03-plaud-api-tos.md](./spike/03-plaud-api-tos.md), but per `feedback_credential_proxy_no_legal` the user-supplied-credential-proxy pattern is standard SaaS-integration practice and not a legal-review gate. Plaud OAuth API access is the long-term migration target.
 2. ✅ **Plaud `/user/me` endpoint:** verified in `src/plaud_notes_mcp/plaud_client.py:~247` — `GET /user/me` on the user's region base URL (US `https://api.plaud.ai`, EU `https://api-euc1.plaud.ai`). Returns 200 + profile, 401 on bad token.
 3. ✅ **Package migration:** PlaudNotes upstream uses in-tree `mcp.server.fastmcp.FastMCP` (`mcp>=1.0.0`); we migrate to standalone `fastmcp>=3.2.4`. Plan 2 Phase 1 handles this.
 4. ✅ **Region default:** US confirmed majority; `/admin` form offers radio us/eu, defaults to us. Auto-detection at runtime via Plaud's custom `-302` redirect (already in `plaud_client.py:~106-109`) is a fallback.
