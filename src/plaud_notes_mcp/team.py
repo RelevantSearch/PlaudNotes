@@ -89,25 +89,46 @@ async def _health(request):  # noqa: ANN001
 
 
 def build_team_app(*, use_in_memory_storage: bool = False) -> Starlette:
-    """Assemble the team-mode ASGI app: GoogleProvider routes + /health.
+    """Assemble the team-mode ASGI app: /health + /admin/* + GoogleProvider routes.
 
-    `use_in_memory_storage=True` skips Firestore for OAuth state and is
-    only useful in tests. Production keeps Firestore (default).
+    `use_in_memory_storage=True` skips Firestore for OAuth state and the
+    user-token store; only useful in tests. Production keeps Firestore.
     """
+    from plaud_notes_mcp.admin import build_admin_routes
     from plaud_notes_mcp.server import mcp
 
     client_storage = None if use_in_memory_storage else _build_firestore_kv()
     provider = build_provider(client_storage=client_storage)
     mcp.auth = provider
 
-    # FastMCP exposes its OAuth + MCP routes via http_app(). Mount /health
-    # at the root layer so probes don't traverse auth.
+    # User-token store + cache (used by /admin/save and the auth middleware
+    # mounted in Phase 7).
+    if use_in_memory_storage:
+        store = None
+        cache = None
+        admin_routes: list = []
+    else:
+        store = build_user_store()
+        cache = build_token_cache(store)
+        admin_routes = build_admin_routes(
+            store=store,
+            cache=cache,
+            google_client_id=_required("GOOGLE_OAUTH_CLIENT_ID"),
+            google_client_secret=_required("GOOGLE_OAUTH_CLIENT_SECRET"),
+            session_secret=_required("SESSION_SECRET"),
+            public_url=_required("PUBLIC_URL"),
+        )
+
     inner = mcp.http_app(transport="streamable-http")
     app = Starlette(
         routes=[
             Route("/health", _health, methods=["GET"]),
+            *admin_routes,
         ],
         lifespan=inner.lifespan,
     )
     app.mount("/", inner)
+    # Stash for the auth middleware (Phase 7).
+    app.state.user_store = store
+    app.state.token_cache = cache
     return app
