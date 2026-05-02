@@ -13,7 +13,7 @@ import logging
 import os
 
 from dotenv import load_dotenv
-from mcp.server.fastmcp import FastMCP
+from fastmcp import FastMCP
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
@@ -60,15 +60,25 @@ class APIKeyMiddleware(BaseHTTPMiddleware):
 
 
 def _build_server() -> FastMCP:
-    """Build the FastMCP server."""
+    """Build the FastMCP server.
+
+    Standalone fastmcp (>=3.x) no longer accepts host/port as constructor
+    kwargs — they live on run_http_async() or as FASTMCP_HOST/FASTMCP_PORT
+    env vars. The HTTP transport branch in main() handles host/port via
+    uvicorn directly, so we just bridge the existing PLAUD_MCP_HOST/PORT
+    contract into FASTMCP_HOST/PORT for the no-api-key streamable-http
+    fallback path.
+    """
+    if "PLAUD_MCP_HOST" in os.environ and "FASTMCP_HOST" not in os.environ:
+        os.environ["FASTMCP_HOST"] = os.environ["PLAUD_MCP_HOST"]
+    if "PLAUD_MCP_PORT" in os.environ and "FASTMCP_PORT" not in os.environ:
+        os.environ["FASTMCP_PORT"] = os.environ["PLAUD_MCP_PORT"]
     return FastMCP(
         "Plaud Notes",
         instructions=(
             "Access your Plaud Notes recordings, transcripts, and AI summaries. "
             "Search across all your voice notes for context and historical reference."
         ),
-        host=os.environ.get("PLAUD_MCP_HOST", "127.0.0.1"),
-        port=int(os.environ.get("PLAUD_MCP_PORT", "8000")),
     )
 
 
