@@ -620,27 +620,36 @@ def main() -> None:
 
     Transport is selected via PLAUD_TRANSPORT env var:
       - "stdio" (default) for Claude Code CLI / Claude Desktop local
-      - "http" for remote deployment (Docker, Railway, Fly.io, etc.)
+      - "http" for remote deployment (Docker, Cloud Run, etc.)
 
-    For HTTP transport, set PLAUD_MCP_API_KEY to require Bearer token
-    authentication on all requests.
+    For HTTP transport, behavior depends on PLAUD_DEPLOYMENT_MODE:
+      - "team" → mounts the OAuth-gated multi-user team app (GoogleProvider
+        + /admin token registration + per-request PlaudClient ContextVar)
+      - unset + PLAUD_MCP_API_KEY set → legacy single-tenant Bearer auth
+      - unset + no API key → legacy single-tenant no-auth (loud warning)
     """
     logging.basicConfig(level=logging.INFO)
     _check_http_security()
 
     transport = os.environ.get("PLAUD_TRANSPORT", "stdio")
     if transport == "http":
-        # Add API key middleware if configured
+        import uvicorn
+
+        host = os.environ.get("PLAUD_MCP_HOST", "127.0.0.1")
+        port = int(os.environ.get("PLAUD_MCP_PORT", "8000"))
+
+        if os.environ.get("PLAUD_DEPLOYMENT_MODE", "").lower() == "team":
+            from plaud_notes_mcp.team import build_team_app
+
+            app = build_team_app()
+            uvicorn.run(app, host=host, port=port)
+            return
+
         api_key = os.environ.get("PLAUD_MCP_API_KEY", "")
         if api_key:
-            app = mcp.streamable_http_app()
+            app = mcp.http_app(transport="streamable-http")
             app.add_middleware(APIKeyMiddleware, api_key=api_key)
-            import uvicorn
-            uvicorn.run(
-                app,
-                host=os.environ.get("PLAUD_MCP_HOST", "127.0.0.1"),
-                port=int(os.environ.get("PLAUD_MCP_PORT", "8000")),
-            )
+            uvicorn.run(app, host=host, port=port)
         else:
             mcp.run(transport="streamable-http")
     else:

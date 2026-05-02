@@ -189,6 +189,7 @@ def build_team_app(*, use_in_memory_storage: bool = False) -> Starlette:
         )
 
     inner = mcp.http_app(transport="streamable-http")
+    inner_lifespan = inner.lifespan  # capture before wrapping
     if cache is not None:
         # Wrap the FastMCP inner app in our auth middleware so the
         # _plaud_client_var ContextVar is populated for /mcp requests.
@@ -198,9 +199,7 @@ def build_team_app(*, use_in_memory_storage: bool = False) -> Starlette:
             Route("/health", _health, methods=["GET"]),
             *admin_routes,
         ],
-        lifespan=getattr(inner, "lifespan", None) or inner.app.lifespan
-        if hasattr(inner, "app")
-        else inner.lifespan,
+        lifespan=inner_lifespan,
     )
     app.mount("/", inner)
     app.state.user_store = store
