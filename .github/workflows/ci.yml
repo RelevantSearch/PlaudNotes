@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install dev deps
+        run: pip install -e ".[dev,team]"
+      - name: ruff
+        run: ruff check src tests
+      - name: black
+        run: black --check src tests
+
+  test:
+    runs-on: ubuntu-latest
+    env:
+      FIRESTORE_EMULATOR_HOST: 127.0.0.1:8087
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install
+        run: pip install -e ".[dev,team]"
+      - name: Set up gcloud
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          install_components: 'beta,cloud-firestore-emulator'
+      - name: Launch Firestore emulator
+        run: |
+          gcloud emulators firestore start --host-port=127.0.0.1:8087 &
+          for i in $(seq 1 30); do
+            if nc -z 127.0.0.1 8087; then break; fi
+            sleep 1
+          done
+      - name: pytest
+        run: pytest -v
