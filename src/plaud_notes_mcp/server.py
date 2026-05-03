@@ -11,6 +11,8 @@ import hmac
 import json
 import logging
 import os
+from contextvars import ContextVar
+from typing import Any
 
 from dotenv import load_dotenv
 from fastmcp import FastMCP
@@ -97,11 +99,11 @@ def _check_http_security() -> None:
                 "Your MCP server is accessible to anyone who can reach it.\n"
                 "Set PLAUD_MCP_API_KEY to require Bearer token auth.\n"
                 "Generate one with:\n"
-                "  python -c \"import secrets; print(secrets.token_urlsafe(32))\"\n"
-                + "=" * 60
+                '  python -c "import secrets; print(secrets.token_urlsafe(32))"\n' + "=" * 60
             )
         else:
             logger.info("HTTP transport: API key authentication enabled.")
+
 
 # ── Client resolution ───────────────────────────────────────────
 #
@@ -112,9 +114,6 @@ def _check_http_security() -> None:
 #     populated by the auth middleware into _plaud_client_var. _get_client()
 #     reads the ContextVar; if unset, raises NoPlaudTokenError which the
 #     tools convert into a structured "no_plaud_token" MCP response.
-
-from contextvars import ContextVar
-from typing import Any
 
 _client: PlaudClient | None = None
 _plaud_client_var: ContextVar[Any] = ContextVar("plaud_client", default=None)
@@ -145,9 +144,7 @@ def _get_client() -> PlaudClient:
     if _team_mode:
         client = _plaud_client_var.get()
         if client is None:
-            raise NoPlaudTokenError(
-                "no Plaud token registered for the current user; visit /admin"
-            )
+            raise NoPlaudTokenError("no Plaud token registered for the current user; visit /admin")
         return client
 
     global _client
@@ -325,17 +322,13 @@ def get_recording_detail(file_id: str) -> str:
             segments = trans_result.get("segments", [])
             if segments:
                 result["transcript_segments"] = len(segments)
-                result["transcript_preview"] = " ".join(
-                    s.get("text", "") for s in segments[:10]
-                )
+                result["transcript_preview"] = " ".join(s.get("text", "") for s in segments[:10])
 
         # Extract AI summary
         ai_content = detail.get("ai_content", "")
         if ai_content:
             if isinstance(ai_content, dict):
-                result["ai_summary"] = ai_content.get(
-                    "content", ai_content.get("summary", "")
-                )
+                result["ai_summary"] = ai_content.get("content", ai_content.get("summary", ""))
             else:
                 result["ai_summary"] = str(ai_content)
 
@@ -373,14 +366,16 @@ def search_notes(query: str, limit: int = 20) -> str:
         matches = []
         for r in results:
             rec = r["recording"]
-            matches.append({
-                "file_id": rec.file_id,
-                "title": rec.filename,
-                "match_type": r["match_type"],
-                "snippet": r["snippet"],
-                "duration": rec.duration_str,
-                "created": rec.created_at.isoformat() if rec.created_at else "unknown",
-            })
+            matches.append(
+                {
+                    "file_id": rec.file_id,
+                    "title": rec.filename,
+                    "match_type": r["match_type"],
+                    "snippet": r["snippet"],
+                    "duration": rec.duration_str,
+                    "created": rec.created_at.isoformat() if rec.created_at else "unknown",
+                }
+            )
 
         return json.dumps(
             {
@@ -411,10 +406,7 @@ def list_tags() -> str:
         if not tags:
             return "No tags found in your Plaud Notes account."
 
-        results = [
-            {"tag_id": t.tag_id, "name": t.name, "count": t.count}
-            for t in tags
-        ]
+        results = [{"tag_id": t.tag_id, "name": t.name, "count": t.count} for t in tags]
         return json.dumps({"tags": results}, indent=2)
     except NoPlaudTokenError:
         return _no_token_response()

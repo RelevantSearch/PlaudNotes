@@ -7,7 +7,6 @@ OAuth client; different redirect URI (/admin/auth/callback).
 
 from __future__ import annotations
 
-import json
 from unittest.mock import AsyncMock, MagicMock
 
 import httpx
@@ -96,13 +95,18 @@ def http_mocks():
 
 
 def _build_app(store, cache, http_mocks, *, plaud_outcome="success"):
-    plaud_response = http_mocks["plaud_me_success" if plaud_outcome == "success" else "plaud_me_unauthorized"]
+    plaud_response = http_mocks[
+        "plaud_me_success" if plaud_outcome == "success" else "plaud_me_unauthorized"
+    ]
 
     def transport_handler(request: httpx.Request) -> httpx.Response:
         url = str(request.url)
         if "oauth2.googleapis.com/token" in url:
             return http_mocks["google_token"]()
-        if "googleapis.com/oauth2/v3/userinfo" in url or "openidconnect.googleapis.com/v1/userinfo" in url:
+        if (
+            "googleapis.com/oauth2/v3/userinfo" in url
+            or "openidconnect.googleapis.com/v1/userinfo" in url
+        ):
             return http_mocks["google_userinfo"]()
         if "/user/me" in url and "plaud.ai" in url:
             return plaud_response()

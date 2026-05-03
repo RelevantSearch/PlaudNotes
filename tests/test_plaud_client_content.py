@@ -8,9 +8,8 @@ Empirical findings (Stefan, 2026-05-02):
 
 from __future__ import annotations
 
-import gzip
 import json
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -92,9 +91,7 @@ def test_find_content_link_priority_order():
 
 
 def test_find_content_link_falls_back_when_preferred_missing():
-    detail = {
-        "content_list": [{"data_type": "transaction", "data_link": "https://s3/old"}]
-    }
+    detail = {"content_list": [{"data_type": "transaction", "data_link": "https://s3/old"}]}
     assert (
         PlaudClient._find_content_link(detail, ("transaction_polish", "transaction"))
         == "https://s3/old"
@@ -108,9 +105,7 @@ def test_find_content_link_none_when_missing():
 
 def test_get_transcript_modern_s3_path(client):
     detail = {
-        "content_list": [
-            {"data_type": "transaction_polish", "data_link": "https://s3/transcript"}
-        ]
+        "content_list": [{"data_type": "transaction_polish", "data_link": "https://s3/transcript"}]
     }
     payload = json.dumps(
         {
@@ -120,10 +115,10 @@ def test_get_transcript_modern_s3_path(client):
             ]
         }
     )
-    gzipped = gzip.compress(payload.encode("utf-8"))
 
-    with patch.object(client, "get_recording_detail", return_value=detail), patch.object(
-        PlaudClient, "_fetch_s3_content", return_value=payload
+    with (
+        patch.object(client, "get_recording_detail", return_value=detail),
+        patch.object(PlaudClient, "_fetch_s3_content", return_value=payload),
     ):
         transcript = client.get_transcript("a" * 32)
 
@@ -144,21 +139,21 @@ def test_get_transcript_legacy_fallback(client):
 
 
 def test_get_summary_modern_s3_path_json_wrapped(client):
-    detail = {
-        "content_list": [{"data_type": "auto_sum_note", "data_link": "https://s3/summary"}]
-    }
-    with patch.object(client, "get_recording_detail", return_value=detail), patch.object(
-        PlaudClient, "_fetch_s3_content", return_value=json.dumps({"ai_content": "the summary"})
+    detail = {"content_list": [{"data_type": "auto_sum_note", "data_link": "https://s3/summary"}]}
+    with (
+        patch.object(client, "get_recording_detail", return_value=detail),
+        patch.object(
+            PlaudClient, "_fetch_s3_content", return_value=json.dumps({"ai_content": "the summary"})
+        ),
     ):
         assert client.get_summary("a" * 32) == "the summary"
 
 
 def test_get_summary_modern_s3_path_raw_markdown(client):
-    detail = {
-        "content_list": [{"data_type": "auto_sum_note", "data_link": "https://s3/summary"}]
-    }
-    with patch.object(client, "get_recording_detail", return_value=detail), patch.object(
-        PlaudClient, "_fetch_s3_content", return_value="# Heading\n\nBody"
+    detail = {"content_list": [{"data_type": "auto_sum_note", "data_link": "https://s3/summary"}]}
+    with (
+        patch.object(client, "get_recording_detail", return_value=detail),
+        patch.object(PlaudClient, "_fetch_s3_content", return_value="# Heading\n\nBody"),
     ):
         assert "Heading" in client.get_summary("a" * 32)
 
@@ -171,13 +166,12 @@ def test_get_summary_legacy_fallback(client):
 
 def test_get_transcript_s3_failure_falls_back(client):
     detail = {
-        "content_list": [
-            {"data_type": "transaction", "data_link": "https://s3/broken"}
-        ],
+        "content_list": [{"data_type": "transaction", "data_link": "https://s3/broken"}],
         "trans_result": {"segments": [{"text": "fallback", "speaker": "A"}]},
     }
-    with patch.object(client, "get_recording_detail", return_value=detail), patch.object(
-        PlaudClient, "_fetch_s3_content", return_value=""  # simulated fetch failure
+    with (
+        patch.object(client, "get_recording_detail", return_value=detail),
+        patch.object(PlaudClient, "_fetch_s3_content", return_value=""),  # simulated fetch failure
     ):
         transcript = client.get_transcript("a" * 32)
     assert len(transcript.segments) == 1

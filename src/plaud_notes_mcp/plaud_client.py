@@ -25,11 +25,13 @@ logger = logging.getLogger(__name__)
 _FILE_ID_PATTERN = re.compile(r"^[a-fA-F0-9]{24,64}$")
 
 # Allowed API domains for redirect safety
-_ALLOWED_API_DOMAINS = frozenset({
-    "api.plaud.ai",
-    "api-euc1.plaud.ai",
-    "api-use1.plaud.ai",
-})
+_ALLOWED_API_DOMAINS = frozenset(
+    {
+        "api.plaud.ai",
+        "api-euc1.plaud.ai",
+        "api-use1.plaud.ai",
+    }
+)
 
 # Regional API base URLs
 API_DOMAINS = {
@@ -208,9 +210,7 @@ class PlaudClient:
         url = url.rstrip("/")
         parsed = urlparse(url)
         if parsed.scheme != "https":
-            raise PlaudAPIError(
-                f"API URL must use HTTPS, got {parsed.scheme!r}"
-            )
+            raise PlaudAPIError(f"API URL must use HTTPS, got {parsed.scheme!r}")
         if parsed.hostname not in _ALLOWED_API_DOMAINS:
             raise PlaudAPIError(
                 f"API domain {parsed.hostname!r} is not a recognized Plaud domain. "
@@ -240,9 +240,10 @@ class PlaudClient:
                 file_mode = os.stat(config_path).st_mode
                 if file_mode & (stat.S_IRGRP | stat.S_IROTH):
                     logger.warning(
-                        "Token file %s is readable by other users (mode %o). "
-                        "Run: chmod 600 %s",
-                        config_path, file_mode & 0o777, config_path,
+                        "Token file %s is readable by other users (mode %o). " "Run: chmod 600 %s",
+                        config_path,
+                        file_mode & 0o777,
+                        config_path,
                     )
             except OSError:
                 pass
@@ -291,9 +292,7 @@ class PlaudClient:
                 # Only redirect once to prevent infinite loops.
                 if isinstance(data, dict) and data.get("status") == -302:
                     if _redirected:
-                        raise PlaudAPIError(
-                            "Multiple API redirects detected; aborting."
-                        )
+                        raise PlaudAPIError("Multiple API redirects detected; aborting.")
                     correct_domain = data.get("domain", "")
                     if correct_domain and correct_domain in _ALLOWED_API_DOMAINS:
                         new_base = f"https://{correct_domain}"
@@ -305,9 +304,7 @@ class PlaudClient:
                         )
                         old_client.close()
                         self._base_url = new_base
-                        return self._request(
-                            method, path, _redirected=True, **kwargs
-                        )
+                        return self._request(method, path, _redirected=True, **kwargs)
                     elif correct_domain:
                         logger.warning(
                             "Ignoring redirect to untrusted domain: %s",
@@ -332,12 +329,8 @@ class PlaudClient:
                     last_error = e
                     continue
                 # Sanitize: strip potential token/header info from error
-                raise PlaudAPIError(
-                    f"Request failed: {type(e).__name__}"
-                ) from None
-        raise PlaudAPIError(
-            f"Request failed after retries: {type(last_error).__name__}"
-        )
+                raise PlaudAPIError(f"Request failed: {type(e).__name__}") from None
+        raise PlaudAPIError(f"Request failed after retries: {type(last_error).__name__}")
 
     def _get(self, path: str, **kwargs: Any) -> dict[str, Any]:
         return self._request("GET", path, **kwargs)
@@ -425,9 +418,7 @@ class PlaudClient:
             return ""
 
     @staticmethod
-    def _find_content_link(
-        detail: dict[str, Any], data_types: tuple[str, ...]
-    ) -> str | None:
+    def _find_content_link(detail: dict[str, Any], data_types: tuple[str, ...]) -> str | None:
         """Find the first data_link in detail["content_list"] matching one of
         the requested data types in priority order. Returns None if not found.
         """
@@ -622,9 +613,7 @@ class PlaudClient:
                 # Extract summary
                 ai_content = detail.get("ai_content", "")
                 if isinstance(ai_content, dict):
-                    entry["summary"] = ai_content.get(
-                        "content", ai_content.get("summary", "")
-                    )
+                    entry["summary"] = ai_content.get("content", ai_content.get("summary", ""))
                 elif ai_content:
                     entry["summary"] = str(ai_content)
             except PlaudAPIError:
@@ -656,11 +645,13 @@ class PlaudClient:
         for rec in recordings:
             # Check filename
             if query_lower in rec.filename.lower():
-                results.append({
-                    "recording": rec,
-                    "match_type": "filename",
-                    "snippet": rec.filename,
-                })
+                results.append(
+                    {
+                        "recording": rec,
+                        "match_type": "filename",
+                        "snippet": rec.filename,
+                    }
+                )
                 continue
 
             # Check transcript and summary
@@ -672,20 +663,20 @@ class PlaudClient:
                 trans_text = ""
                 if isinstance(trans_result, dict):
                     segments = trans_result.get("segments", [])
-                    trans_text = " ".join(
-                        s.get("text", "") for s in segments
-                    )
+                    trans_text = " ".join(s.get("text", "") for s in segments)
                 if query_lower in trans_text.lower():
                     # Extract snippet around match
                     idx = trans_text.lower().index(query_lower)
                     start = max(0, idx - 100)
                     end = min(len(trans_text), idx + len(query) + 100)
                     snippet = trans_text[start:end]
-                    results.append({
-                        "recording": rec,
-                        "match_type": "transcript",
-                        "snippet": f"...{snippet}...",
-                    })
+                    results.append(
+                        {
+                            "recording": rec,
+                            "match_type": "transcript",
+                            "snippet": f"...{snippet}...",
+                        }
+                    )
                     continue
 
                 # Search summary
@@ -701,11 +692,13 @@ class PlaudClient:
                     start = max(0, idx - 100)
                     end = min(len(summary_text), idx + len(query) + 100)
                     snippet = summary_text[start:end]
-                    results.append({
-                        "recording": rec,
-                        "match_type": "summary",
-                        "snippet": f"...{snippet}...",
-                    })
+                    results.append(
+                        {
+                            "recording": rec,
+                            "match_type": "summary",
+                            "snippet": f"...{snippet}...",
+                        }
+                    )
             except PlaudAPIError:
                 continue
 

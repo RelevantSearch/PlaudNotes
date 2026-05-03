@@ -69,9 +69,7 @@ def build_admin_routes(
     redirect_uri = public_url.rstrip("/") + "/admin/auth/callback"
     owned_client: httpx.AsyncClient | None = None
     if http_client is None:
-        owned_client = httpx.AsyncClient(
-            timeout=httpx.Timeout(connect=5, read=10, write=5, pool=5)
-        )
+        owned_client = httpx.AsyncClient(timeout=httpx.Timeout(connect=5, read=10, write=5, pool=5))
         client = owned_client
     else:
         client = http_client
@@ -170,7 +168,10 @@ def build_admin_routes(
         if me_resp.status_code != 200:
             logger.warning(
                 "plaud /user/me unexpected status",
-                extra={"status": me_resp.status_code, "google_sub_prefix": session["google_sub"][:8]},
+                extra={
+                    "status": me_resp.status_code,
+                    "google_sub_prefix": session["google_sub"][:8],
+                },
             )
             return Response("plaud upstream error", status_code=502)
         # Persist (encrypts under KMS); invalidate cache so next /mcp request

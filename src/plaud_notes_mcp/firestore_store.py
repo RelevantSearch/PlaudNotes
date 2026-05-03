@@ -151,7 +151,5 @@ class FirestoreStore:
 
     async def _decrypt(self, ciphertext: bytes) -> str:
         kms = await self._kms_client()
-        resp = await kms.decrypt(
-            request={"name": self._kms_key_name, "ciphertext": ciphertext}
-        )
+        resp = await kms.decrypt(request={"name": self._kms_key_name, "ciphertext": ciphertext})
         return resp.plaintext.decode("utf-8")

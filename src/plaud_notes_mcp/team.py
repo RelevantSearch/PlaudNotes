@@ -32,9 +32,7 @@ def is_team_mode() -> bool:
 def _required(name: str) -> str:
     val = os.environ.get(name)
     if not val:
-        raise RuntimeError(
-            f"team-mode requires env var {name!r} (set in Plan 1 Phase 6 secrets)"
-        )
+        raise RuntimeError(f"team-mode requires env var {name!r} (set in Plan 1 Phase 6 secrets)")
     return val
 
 
