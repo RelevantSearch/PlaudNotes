@@ -11,9 +11,11 @@ import hmac
 import json
 import logging
 import os
+from contextvars import ContextVar
+from typing import Any
 
 from dotenv import load_dotenv
-from mcp.server.fastmcp import FastMCP
+from fastmcp import FastMCP
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
@@ -60,15 +62,25 @@ class APIKeyMiddleware(BaseHTTPMiddleware):
 
 
 def _build_server() -> FastMCP:
-    """Build the FastMCP server."""
+    """Build the FastMCP server.
+
+    Standalone fastmcp (>=3.x) no longer accepts host/port as constructor
+    kwargs — they live on run_http_async() or as FASTMCP_HOST/FASTMCP_PORT
+    env vars. The HTTP transport branch in main() handles host/port via
+    uvicorn directly, so we just bridge the existing PLAUD_MCP_HOST/PORT
+    contract into FASTMCP_HOST/PORT for the no-api-key streamable-http
+    fallback path.
+    """
+    if "PLAUD_MCP_HOST" in os.environ and "FASTMCP_HOST" not in os.environ:
+        os.environ["FASTMCP_HOST"] = os.environ["PLAUD_MCP_HOST"]
+    if "PLAUD_MCP_PORT" in os.environ and "FASTMCP_PORT" not in os.environ:
+        os.environ["FASTMCP_PORT"] = os.environ["PLAUD_MCP_PORT"]
     return FastMCP(
         "Plaud Notes",
         instructions=(
             "Access your Plaud Notes recordings, transcripts, and AI summaries. "
             "Search across all your voice notes for context and historical reference."
         ),
-        host=os.environ.get("PLAUD_MCP_HOST", "127.0.0.1"),
-        port=int(os.environ.get("PLAUD_MCP_PORT", "8000")),
     )
 
 
@@ -87,19 +99,54 @@ def _check_http_security() -> None:
                 "Your MCP server is accessible to anyone who can reach it.\n"
                 "Set PLAUD_MCP_API_KEY to require Bearer token auth.\n"
                 "Generate one with:\n"
-                "  python -c \"import secrets; print(secrets.token_urlsafe(32))\"\n"
-                + "=" * 60
+                '  python -c "import secrets; print(secrets.token_urlsafe(32))"\n' + "=" * 60
             )
         else:
             logger.info("HTTP transport: API key authentication enabled.")
 
-# ── Client singleton ────────────────────────────────────────────
+
+# ── Client resolution ───────────────────────────────────────────
+#
+# Two modes:
+#   - Local stdio (default): _client is a module-level singleton built
+#     from PLAUD_TOKEN env var. Behavior unchanged from upstream.
+#   - Team mode (PLAUD_DEPLOYMENT_MODE=team): per-request PlaudClient
+#     populated by the auth middleware into _plaud_client_var. _get_client()
+#     reads the ContextVar; if unset, raises NoPlaudTokenError which the
+#     tools convert into a structured "no_plaud_token" MCP response.
 
 _client: PlaudClient | None = None
+_plaud_client_var: ContextVar[Any] = ContextVar("plaud_client", default=None)
+_team_mode: bool = False
+
+
+class NoPlaudTokenError(RuntimeError):
+    """Raised in team mode when the authenticated user has no Plaud token registered."""
+
+
+def set_team_mode(enabled: bool) -> None:
+    global _team_mode
+    _team_mode = bool(enabled)
+
+
+def is_team_mode() -> bool:
+    return _team_mode
 
 
 def _get_client() -> PlaudClient:
-    """Get or create the Plaud API client."""
+    """Resolve the PlaudClient for the current request.
+
+    Team mode: read ContextVar populated by auth middleware. Raise
+    NoPlaudTokenError if missing.
+
+    Local mode: lazily construct singleton from PLAUD_TOKEN env var.
+    """
+    if _team_mode:
+        client = _plaud_client_var.get()
+        if client is None:
+            raise NoPlaudTokenError("no Plaud token registered for the current user; visit /admin")
+        return client
+
     global _client
     if _client is None:
         token = os.environ.get("PLAUD_TOKEN")
@@ -111,6 +158,20 @@ def _get_client() -> PlaudClient:
             api_domain=api_domain,
         )
     return _client
+
+
+def structured_no_token_error(*, public_url: str | None = None) -> dict[str, str]:
+    """Return the structured 'no_plaud_token' MCP error body."""
+    base = (public_url or os.environ.get("PUBLIC_URL", "")).rstrip("/")
+    return {
+        "error": "no_plaud_token",
+        "registration_url": f"{base}/admin" if base else "/admin",
+        "message": "Register your Plaud token at the URL above, then retry.",
+    }
+
+
+def _no_token_response() -> str:
+    return json.dumps(structured_no_token_error(), indent=2)
 
 
 # ── Tools ───────────────────────────────────────────────────────
@@ -160,6 +221,8 @@ def list_recordings(
             {"total_returned": len(results), "recordings": results},
             indent=2,
         )
+    except NoPlaudTokenError:
+        return _no_token_response()
     except PlaudAuthError as e:
         return f"Authentication error: {e}"
     except PlaudAPIError as e:
@@ -191,6 +254,8 @@ def get_transcript(file_id: str) -> str:
             },
             indent=2,
         )
+    except NoPlaudTokenError:
+        return _no_token_response()
     except PlaudAuthError as e:
         return f"Authentication error: {e}"
     except PlaudAPIError as e:
@@ -222,6 +287,8 @@ def get_summary(file_id: str) -> str:
             result["notes"] = notes
 
         return json.dumps(result, indent=2)
+    except NoPlaudTokenError:
+        return _no_token_response()
     except PlaudAuthError as e:
         return f"Authentication error: {e}"
     except PlaudAPIError as e:
@@ -255,21 +322,19 @@ def get_recording_detail(file_id: str) -> str:
             segments = trans_result.get("segments", [])
             if segments:
                 result["transcript_segments"] = len(segments)
-                result["transcript_preview"] = " ".join(
-                    s.get("text", "") for s in segments[:10]
-                )
+                result["transcript_preview"] = " ".join(s.get("text", "") for s in segments[:10])
 
         # Extract AI summary
         ai_content = detail.get("ai_content", "")
         if ai_content:
             if isinstance(ai_content, dict):
-                result["ai_summary"] = ai_content.get(
-                    "content", ai_content.get("summary", "")
-                )
+                result["ai_summary"] = ai_content.get("content", ai_content.get("summary", ""))
             else:
                 result["ai_summary"] = str(ai_content)
 
         return json.dumps(result, indent=2)
+    except NoPlaudTokenError:
+        return _no_token_response()
     except PlaudAuthError as e:
         return f"Authentication error: {e}"
     except PlaudAPIError as e:
@@ -301,14 +366,16 @@ def search_notes(query: str, limit: int = 20) -> str:
         matches = []
         for r in results:
             rec = r["recording"]
-            matches.append({
-                "file_id": rec.file_id,
-                "title": rec.filename,
-                "match_type": r["match_type"],
-                "snippet": r["snippet"],
-                "duration": rec.duration_str,
-                "created": rec.created_at.isoformat() if rec.created_at else "unknown",
-            })
+            matches.append(
+                {
+                    "file_id": rec.file_id,
+                    "title": rec.filename,
+                    "match_type": r["match_type"],
+                    "snippet": r["snippet"],
+                    "duration": rec.duration_str,
+                    "created": rec.created_at.isoformat() if rec.created_at else "unknown",
+                }
+            )
 
         return json.dumps(
             {
@@ -318,6 +385,8 @@ def search_notes(query: str, limit: int = 20) -> str:
             },
             indent=2,
         )
+    except NoPlaudTokenError:
+        return _no_token_response()
     except PlaudAuthError as e:
         return f"Authentication error: {e}"
     except PlaudAPIError as e:
@@ -337,11 +406,10 @@ def list_tags() -> str:
         if not tags:
             return "No tags found in your Plaud Notes account."
 
-        results = [
-            {"tag_id": t.tag_id, "name": t.name, "count": t.count}
-            for t in tags
-        ]
+        results = [{"tag_id": t.tag_id, "name": t.name, "count": t.count} for t in tags]
         return json.dumps({"tags": results}, indent=2)
+    except NoPlaudTokenError:
+        return _no_token_response()
     except PlaudAuthError as e:
         return f"Authentication error: {e}"
     except PlaudAPIError as e:
@@ -362,6 +430,8 @@ def list_speakers() -> str:
             return "No speakers found."
 
         return json.dumps({"speakers": speakers}, indent=2)
+    except NoPlaudTokenError:
+        return _no_token_response()
     except PlaudAuthError as e:
         return f"Authentication error: {e}"
     except PlaudAPIError as e:
@@ -393,6 +463,8 @@ def get_audio_url(file_id: str) -> str:
             },
             indent=2,
         )
+    except NoPlaudTokenError:
+        return _no_token_response()
     except PlaudAuthError as e:
         return f"Authentication error: {e}"
     except PlaudAPIError as e:
@@ -410,6 +482,8 @@ def get_user_info() -> str:
         client = _get_client()
         info = client.get_user_info()
         return json.dumps({"user": info}, indent=2)
+    except NoPlaudTokenError:
+        return _no_token_response()
     except PlaudAuthError as e:
         return f"Authentication error: {e}"
     except PlaudAPIError as e:
@@ -430,6 +504,8 @@ def list_devices() -> str:
             return "No devices found on your Plaud account."
 
         return json.dumps({"devices": devices}, indent=2)
+    except NoPlaudTokenError:
+        return _no_token_response()
     except PlaudAuthError as e:
         return f"Authentication error: {e}"
     except PlaudAPIError as e:
@@ -458,6 +534,8 @@ def get_recent_context(count: int = 5) -> str:
             {"recent_notes_count": len(results), "notes": results},
             indent=2,
         )
+    except NoPlaudTokenError:
+        return _no_token_response()
     except PlaudAuthError as e:
         return f"Authentication error: {e}"
     except PlaudAPIError as e:
@@ -497,6 +575,8 @@ def get_recordings_by_tag(tag_id: str) -> str:
             {"tag_id": tag_id, "count": len(results), "recordings": results},
             indent=2,
         )
+    except NoPlaudTokenError:
+        return _no_token_response()
     except PlaudAuthError as e:
         return f"Authentication error: {e}"
     except PlaudAPIError as e:
@@ -532,27 +612,36 @@ def main() -> None:
 
     Transport is selected via PLAUD_TRANSPORT env var:
       - "stdio" (default) for Claude Code CLI / Claude Desktop local
-      - "http" for remote deployment (Docker, Railway, Fly.io, etc.)
+      - "http" for remote deployment (Docker, Cloud Run, etc.)
 
-    For HTTP transport, set PLAUD_MCP_API_KEY to require Bearer token
-    authentication on all requests.
+    For HTTP transport, behavior depends on PLAUD_DEPLOYMENT_MODE:
+      - "team" → mounts the OAuth-gated multi-user team app (GoogleProvider
+        + /admin token registration + per-request PlaudClient ContextVar)
+      - unset + PLAUD_MCP_API_KEY set → legacy single-tenant Bearer auth
+      - unset + no API key → legacy single-tenant no-auth (loud warning)
     """
     logging.basicConfig(level=logging.INFO)
     _check_http_security()
 
     transport = os.environ.get("PLAUD_TRANSPORT", "stdio")
     if transport == "http":
-        # Add API key middleware if configured
+        import uvicorn
+
+        host = os.environ.get("PLAUD_MCP_HOST", "127.0.0.1")
+        port = int(os.environ.get("PLAUD_MCP_PORT", "8000"))
+
+        if os.environ.get("PLAUD_DEPLOYMENT_MODE", "").lower() == "team":
+            from plaud_notes_mcp.team import build_team_app
+
+            app = build_team_app()
+            uvicorn.run(app, host=host, port=port)
+            return
+
         api_key = os.environ.get("PLAUD_MCP_API_KEY", "")
         if api_key:
-            app = mcp.streamable_http_app()
+            app = mcp.http_app(transport="streamable-http")
             app.add_middleware(APIKeyMiddleware, api_key=api_key)
-            import uvicorn
-            uvicorn.run(
-                app,
-                host=os.environ.get("PLAUD_MCP_HOST", "127.0.0.1"),
-                port=int(os.environ.get("PLAUD_MCP_PORT", "8000")),
-            )
+            uvicorn.run(app, host=host, port=port)
         else:
             mcp.run(transport="streamable-http")
     else:

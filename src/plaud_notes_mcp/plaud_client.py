@@ -7,6 +7,7 @@ at api.plaud.ai used by web.plaud.ai.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -24,11 +25,13 @@ logger = logging.getLogger(__name__)
 _FILE_ID_PATTERN = re.compile(r"^[a-fA-F0-9]{24,64}$")
 
 # Allowed API domains for redirect safety
-_ALLOWED_API_DOMAINS = frozenset({
-    "api.plaud.ai",
-    "api-euc1.plaud.ai",
-    "api-use1.plaud.ai",
-})
+_ALLOWED_API_DOMAINS = frozenset(
+    {
+        "api.plaud.ai",
+        "api-euc1.plaud.ai",
+        "api-use1.plaud.ai",
+    }
+)
 
 # Regional API base URLs
 API_DOMAINS = {
@@ -100,11 +103,22 @@ class TranscriptSegment:
 
     @classmethod
     def from_api(cls, data: dict[str, Any]) -> TranscriptSegment:
+        # The S3-fetched gzipped JSON uses different keys than the inline
+        # legacy shape: content/start_time/end_time vs text/start_ms/bg.
+        # Verified empirically against real Plaud recordings; both 4m and
+        # 2h+ recordings used the new keys exclusively. Keep the legacy
+        # fallbacks for backward compat with older recordings.
         return cls(
-            text=data.get("text", ""),
+            text=data.get("text", data.get("content", "")),
             speaker=data.get("speaker", data.get("spk", "")),
-            start_ms=data.get("start_time_ms", data.get("start", data.get("bg", 0))),
-            end_ms=data.get("end_time_ms", data.get("end", data.get("ed", 0))),
+            start_ms=data.get(
+                "start_time_ms",
+                data.get("start_time", data.get("start", data.get("bg", 0))),
+            ),
+            end_ms=data.get(
+                "end_time_ms",
+                data.get("end_time", data.get("end", data.get("ed", 0))),
+            ),
         )
 
 
@@ -196,9 +210,7 @@ class PlaudClient:
         url = url.rstrip("/")
         parsed = urlparse(url)
         if parsed.scheme != "https":
-            raise PlaudAPIError(
-                f"API URL must use HTTPS, got {parsed.scheme!r}"
-            )
+            raise PlaudAPIError(f"API URL must use HTTPS, got {parsed.scheme!r}")
         if parsed.hostname not in _ALLOWED_API_DOMAINS:
             raise PlaudAPIError(
                 f"API domain {parsed.hostname!r} is not a recognized Plaud domain. "
@@ -228,9 +240,10 @@ class PlaudClient:
                 file_mode = os.stat(config_path).st_mode
                 if file_mode & (stat.S_IRGRP | stat.S_IROTH):
                     logger.warning(
-                        "Token file %s is readable by other users (mode %o). "
-                        "Run: chmod 600 %s",
-                        config_path, file_mode & 0o777, config_path,
+                        "Token file %s is readable by other users (mode %o). " "Run: chmod 600 %s",
+                        config_path,
+                        file_mode & 0o777,
+                        config_path,
                     )
             except OSError:
                 pass
@@ -279,9 +292,7 @@ class PlaudClient:
                 # Only redirect once to prevent infinite loops.
                 if isinstance(data, dict) and data.get("status") == -302:
                     if _redirected:
-                        raise PlaudAPIError(
-                            "Multiple API redirects detected; aborting."
-                        )
+                        raise PlaudAPIError("Multiple API redirects detected; aborting.")
                     correct_domain = data.get("domain", "")
                     if correct_domain and correct_domain in _ALLOWED_API_DOMAINS:
                         new_base = f"https://{correct_domain}"
@@ -293,9 +304,7 @@ class PlaudClient:
                         )
                         old_client.close()
                         self._base_url = new_base
-                        return self._request(
-                            method, path, _redirected=True, **kwargs
-                        )
+                        return self._request(method, path, _redirected=True, **kwargs)
                     elif correct_domain:
                         logger.warning(
                             "Ignoring redirect to untrusted domain: %s",
@@ -320,12 +329,8 @@ class PlaudClient:
                     last_error = e
                     continue
                 # Sanitize: strip potential token/header info from error
-                raise PlaudAPIError(
-                    f"Request failed: {type(e).__name__}"
-                ) from None
-        raise PlaudAPIError(
-            f"Request failed after retries: {type(last_error).__name__}"
-        )
+                raise PlaudAPIError(f"Request failed: {type(e).__name__}") from None
+        raise PlaudAPIError(f"Request failed after retries: {type(last_error).__name__}")
 
     def _get(self, path: str, **kwargs: Any) -> dict[str, Any]:
         return self._request("GET", path, **kwargs)
@@ -379,33 +384,148 @@ class PlaudClient:
         # API returns temp_url at top level
         return data.get("temp_url", data.get("data", {}).get("url", ""))
 
+    # ── Content fetch (S3 data_link) ────────────────────────────
+    #
+    # Modern Plaud recordings store transcript and summary content in
+    # gzipped JSON behind data_link URLs in detail["content_list"]. Fetch
+    # via urllib (httpx is configured against api.plaud.ai; data_links
+    # point at S3), gunzip, decode utf-8.
+
+    @staticmethod
+    def _fetch_s3_content(url: str) -> str:
+        """GET a Plaud S3 data_link, gunzip if compressed, return utf-8 string.
+
+        Returns "" on any failure (logs a warning) so callers can fall
+        back to the legacy inline path.
+        """
+        import gzip
+        import urllib.request
+
+        try:
+            with urllib.request.urlopen(url, timeout=30) as resp:  # noqa: S310 — Plaud-issued URL
+                body = resp.read()
+        except Exception as e:  # noqa: BLE001 — defensive; never raise
+            logger.warning("plaud S3 fetch failed: %s", e)
+            return ""
+        try:
+            body = gzip.decompress(body)
+        except (OSError, gzip.BadGzipFile):
+            pass  # not gzipped — use raw bytes
+        try:
+            return body.decode("utf-8")
+        except UnicodeDecodeError as e:
+            logger.warning("plaud S3 content not utf-8: %s", e)
+            return ""
+
+    @staticmethod
+    def _find_content_link(detail: dict[str, Any], data_types: tuple[str, ...]) -> str | None:
+        """Find the first data_link in detail["content_list"] matching one of
+        the requested data types in priority order. Returns None if not found.
+        """
+        items = detail.get("content_list") or []
+        if not isinstance(items, list):
+            return None
+        for wanted in data_types:
+            for item in items:
+                if not isinstance(item, dict):
+                    continue
+                if item.get("data_type") == wanted and item.get("data_link"):
+                    return item["data_link"]
+        return None
+
     # ── Transcripts ─────────────────────────────────────────────
 
     def get_transcript(self, file_id: str) -> Transcript:
-        """Get the transcript for a recording."""
+        """Get the transcript for a recording.
+
+        Tries the modern S3/content_list path first (data_type
+        "transaction_polish" preferred over "transaction"); falls back to
+        the legacy inline detail["trans_result"] path. Empty when neither
+        path yields data — never raises.
+        """
         file_id = self._validate_file_id(file_id)
         detail = self.get_recording_detail(file_id)
-        trans_result = detail.get("trans_result", {})
 
+        # Modern path: gzipped JSON behind a data_link
+        link = self._find_content_link(detail, ("transaction_polish", "transaction"))
+        if link:
+            raw = self._fetch_s3_content(link)
+            if raw:
+                try:
+                    parsed = json.loads(raw)
+                except json.JSONDecodeError as e:
+                    logger.warning("transcript JSON parse failed: %s", e)
+                    parsed = None
+                if isinstance(parsed, dict):
+                    raw_segments = parsed.get("segments", parsed.get("result", []))
+                elif isinstance(parsed, list):
+                    raw_segments = parsed
+                else:
+                    raw_segments = []
+                if raw_segments:
+                    segments = [TranscriptSegment.from_api(s) for s in raw_segments]
+                    return Transcript(file_id=file_id, segments=segments)
+
+        # Legacy fallback: inline trans_result
+        trans_result = detail.get("trans_result", {})
         segments = []
         if isinstance(trans_result, dict):
             raw_segments = trans_result.get("segments", trans_result.get("result", []))
             segments = [TranscriptSegment.from_api(s) for s in raw_segments]
         elif isinstance(trans_result, list):
             segments = [TranscriptSegment.from_api(s) for s in trans_result]
-
         return Transcript(file_id=file_id, segments=segments)
 
     # ── AI Summaries ────────────────────────────────────────────
 
     def get_summary(self, file_id: str) -> str:
-        """Get the AI-generated summary for a recording."""
+        """Get the AI-generated summary for a recording.
+
+        Tries modern S3/content_list (data_type "auto_sum_note") first;
+        unwraps the JSON-wrapped variant {"ai_content": "..."} when
+        present; falls back to inline detail["ai_content"]. Returns ""
+        when no summary is available.
+        """
         file_id = self._validate_file_id(file_id)
         detail = self.get_recording_detail(file_id)
+
+        # Modern path
+        link = self._find_content_link(detail, ("auto_sum_note",))
+        if link:
+            raw = self._fetch_s3_content(link)
+            if raw:
+                summary = self._unwrap_summary(raw)
+                if summary:
+                    return summary
+
+        # Legacy fallback
         ai_content = detail.get("ai_content", "")
         if isinstance(ai_content, dict):
             return ai_content.get("content", ai_content.get("summary", str(ai_content)))
         return str(ai_content) if ai_content else ""
+
+    @staticmethod
+    def _unwrap_summary(raw: str) -> str:
+        """Detect JSON-wrapped summaries and unwrap; otherwise return raw text.
+
+        Plaud's auto_sum_note is sometimes raw markdown, sometimes JSON
+        with the markdown nested under "ai_content"/"content"/"summary"/
+        "text". Empirically verified against 2h+ recordings.
+        """
+        stripped = raw.lstrip()
+        if not stripped.startswith("{"):
+            return raw
+        try:
+            parsed = json.loads(stripped)
+        except json.JSONDecodeError:
+            return raw
+        if not isinstance(parsed, dict):
+            return raw
+        for key in ("ai_content", "content", "summary", "text"):
+            value = parsed.get(key)
+            if isinstance(value, str) and value:
+                return value
+        return raw
 
     def get_notes(self, file_id: str) -> str:
         """Get AI-generated notes for a recording."""
@@ -493,9 +613,7 @@ class PlaudClient:
                 # Extract summary
                 ai_content = detail.get("ai_content", "")
                 if isinstance(ai_content, dict):
-                    entry["summary"] = ai_content.get(
-                        "content", ai_content.get("summary", "")
-                    )
+                    entry["summary"] = ai_content.get("content", ai_content.get("summary", ""))
                 elif ai_content:
                     entry["summary"] = str(ai_content)
             except PlaudAPIError:
@@ -527,11 +645,13 @@ class PlaudClient:
         for rec in recordings:
             # Check filename
             if query_lower in rec.filename.lower():
-                results.append({
-                    "recording": rec,
-                    "match_type": "filename",
-                    "snippet": rec.filename,
-                })
+                results.append(
+                    {
+                        "recording": rec,
+                        "match_type": "filename",
+                        "snippet": rec.filename,
+                    }
+                )
                 continue
 
             # Check transcript and summary
@@ -543,20 +663,20 @@ class PlaudClient:
                 trans_text = ""
                 if isinstance(trans_result, dict):
                     segments = trans_result.get("segments", [])
-                    trans_text = " ".join(
-                        s.get("text", "") for s in segments
-                    )
+                    trans_text = " ".join(s.get("text", "") for s in segments)
                 if query_lower in trans_text.lower():
                     # Extract snippet around match
                     idx = trans_text.lower().index(query_lower)
                     start = max(0, idx - 100)
                     end = min(len(trans_text), idx + len(query) + 100)
                     snippet = trans_text[start:end]
-                    results.append({
-                        "recording": rec,
-                        "match_type": "transcript",
-                        "snippet": f"...{snippet}...",
-                    })
+                    results.append(
+                        {
+                            "recording": rec,
+                            "match_type": "transcript",
+                            "snippet": f"...{snippet}...",
+                        }
+                    )
                     continue
 
                 # Search summary
@@ -572,11 +692,13 @@ class PlaudClient:
                     start = max(0, idx - 100)
                     end = min(len(summary_text), idx + len(query) + 100)
                     snippet = summary_text[start:end]
-                    results.append({
-                        "recording": rec,
-                        "match_type": "summary",
-                        "snippet": f"...{snippet}...",
-                    })
+                    results.append(
+                        {
+                            "recording": rec,
+                            "match_type": "summary",
+                            "snippet": f"...{snippet}...",
+                        }
+                    )
             except PlaudAPIError:
                 continue
 

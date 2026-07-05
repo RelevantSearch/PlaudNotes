@@ -1,0 +1,87 @@
+name: Deploy to Cloud Run
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  GCP_PROJECT_ID: rs-workspace-integrations
+  GCP_REGION: us-central1
+  SERVICE_NAME: plaud-mcp
+  AR_REPO: plaud-mcp
+  RUNTIME_SA: plaud-mcp@rs-workspace-integrations.iam.gserviceaccount.com
+  DEPLOYER_SA: plaud-mcp-deployer@rs-workspace-integrations.iam.gserviceaccount.com
+  WIF_PROVIDER: projects/547220269732/locations/global/workloadIdentityPools/github-pool/providers/github-provider
+
+jobs:
+  deploy:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Authenticate to GCP via WIF
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ env.WIF_PROVIDER }}
+          service_account: ${{ env.DEPLOYER_SA }}
+
+      - name: Set up gcloud
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker "$GCP_REGION-docker.pkg.dev" --quiet
+
+      - name: Build and push image
+        run: |
+          IMAGE="$GCP_REGION-docker.pkg.dev/$GCP_PROJECT_ID/$AR_REPO/server:$GITHUB_SHA"
+          docker build -t "$IMAGE" .
+          docker push "$IMAGE"
+          echo "IMAGE=$IMAGE" >> "$GITHUB_ENV"
+
+      - name: Deploy revision (no traffic)
+        env:
+          SHORT_SHA: ${{ github.sha }}
+        run: |
+          SHORT="${SHORT_SHA:0:7}"
+          gcloud run deploy "$SERVICE_NAME" \
+            --image "$IMAGE" \
+            --region "$GCP_REGION" \
+            --project "$GCP_PROJECT_ID" \
+            --service-account "$RUNTIME_SA" \
+            --no-traffic \
+            --tag "sha-$SHORT"
+
+      - name: Smoke /health on tagged revision
+        env:
+          SHORT_SHA: ${{ github.sha }}
+        run: |
+          SHORT="${SHORT_SHA:0:7}"
+          TAG_URL=$(gcloud run services describe "$SERVICE_NAME" \
+            --region "$GCP_REGION" --project "$GCP_PROJECT_ID" \
+            --format="value(status.traffic[?tag=='sha-$SHORT'].url)" \
+            | head -1)
+          echo "Tagged URL: $TAG_URL"
+          for i in $(seq 1 20); do
+            if curl -sf "$TAG_URL/health" > /dev/null; then
+              echo "health OK"
+              exit 0
+            fi
+            sleep 3
+          done
+          echo "health check failed"
+          exit 1
+
+      - name: Shift traffic to new revision
+        env:
+          SHORT_SHA: ${{ github.sha }}
+        run: |
+          SHORT="${SHORT_SHA:0:7}"
+          gcloud run services update-traffic "$SERVICE_NAME" \
+            --region "$GCP_REGION" --project "$GCP_PROJECT_ID" \
+            --to-tags "sha-$SHORT=100"
